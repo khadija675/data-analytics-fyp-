@@ -1,4 +1,4 @@
-# app.py — SynthAI Pro Max — Upgraded with Smart CTGAN Validation, Fallbacks & Downloads
+# app.py — SynthAI Pro Max — FINAL PROFESSIONAL & BULLETPROOF (2025)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -10,273 +10,145 @@ import csv
 from datetime import datetime
 import warnings
 import io
-import tempfile
 import zipfile
-import json
-import os
 
 warnings.filterwarnings("ignore")
 plt.style.use('default')
 sns.set_palette("husl")
 
-# ---------------------- Robust SDV imports ----------------------
-CTGAN_AVAILABLE = True
+# ---------------------- SDV Imports ----------------------
 try:
     from sdv.single_table import CTGANSynthesizer, GaussianCopulaSynthesizer
-except Exception:
-    try:
-        from sdv.tabular import CTGANSynthesizer, GaussianCopulaSynthesizer
-    except Exception:
-        CTGAN_AVAILABLE = False
-        try:
-            from sdv.single_table import GaussianCopulaSynthesizer
-        except Exception:
-            GaussianCopulaSynthesizer = None  # will raise at runtime if used
-
-from sdv.metadata import SingleTableMetadata
-try:
+    from sdv.metadata import SingleTableMetadata
     from sdv.evaluation.single_table import evaluate_quality
 except Exception:
+    from sdv.single_table import GaussianCopulaSynthesizer
+    from sdv.metadata import SingleTableMetadata
     evaluate_quality = None
 
-# ---------------------- Utility helpers ----------------------
-def smart_epoch_for_size(n_rows, user_epochs):
-    """Return an advisable epochs value depending on dataset size and user setting"""
-    if n_rows < 50:
-        return 0  # signal: do not run CTGAN
-    if n_rows < 100:
-        return min(user_epochs, 80)
-    if n_rows < 500:
-        return min(user_epochs, 200)
-    if n_rows < 2000:
-        return min(user_epochs, 300)
-    return min(user_epochs, 500)
-
-def smart_batch_for_size(n_rows, user_batch):
-    """Return a batch size that is multiple of 32 and fits dataset"""
-    if n_rows <= 100:
-        base = 32
-    elif n_rows <= 500:
-        base = 64
-    elif n_rows <= 2000:
-        base = 128
-    else:
-        base = 256
-    # respect user's upper bound
-    batch = min(user_batch, base)
-    # ensure divisibility by 32
-    batch = max(32, batch - (batch % 32))
-    if batch == 0:
-        batch = 32
-    # final clip
-    if batch > n_rows:
-        batch = 32 if n_rows >= 32 else n_rows
-    return int(batch)
-
-def dataset_summary(df):
-    """Return summary dict: total variables, missing %, per-col missing, dtypes"""
-    total_vars = df.shape[1]
-    total_rows = df.shape[0]
-    missing_perc = df.isna().mean().mean()  # overall fraction
-    per_col_missing = (df.isna().sum() / max(1, total_rows)).round(4).to_dict()
-    dtypes = df.dtypes.astype(str).to_dict()
-    return {
-        "total_rows": total_rows,
-        "total_vars": total_vars,
-        "overall_missing_fraction": round(missing_perc,4),
-        "per_col_missing": per_col_missing,
-        "dtypes": dtypes
-    }
-
-def prepare_clean_df(raw_df):
-    """
-    Perform cleaning & column dropping logic:
-    - drop date/time/id-like columns
-    - drop object cols if high-cardinality or long strings
-    - drop constant or all-missing columns
-    - drop rows with any missing (keeps same prior behavior)
-    Return: (clean_df, dropped_columns_list)
-    """
+# ---------------------- PROFESSIONAL PREPROCESSING ----------------------
+def prepare_data_for_synthesis(raw_df):
     df = raw_df.copy()
-    drop_cols = []
-    for col in df.columns:
-        low = col.lower()
-        if any(x in low for x in ['date','time','id']):
-            drop_cols.append(col)
-            continue
-        # dtype/object checks
-        try:
-            if df[col].dtype == 'object':
-                if df[col].nunique(dropna=True) > 50:
-                    drop_cols.append(col); continue
-                if df[col].astype(str).str.len().mean() > 40:
-                    drop_cols.append(col); continue
-        except Exception:
-            drop_cols.append(col); continue
-        # drop low-variance or all-missing
-        try:
-            if df[col].nunique(dropna=True) <= 1 or df[col].isna().all():
-                drop_cols.append(col); continue
-        except Exception:
-            pass
-    clean_df = df.drop(columns=drop_cols, errors='ignore').reset_index(drop=True)
-    # drop rows with any missing (same as your original behavior)
-    clean_df = clean_df.dropna(how='any').reset_index(drop=True)
-    return clean_df, drop_cols
+    preserve_cols = []    # IDs, dates, names, high-cardinality → keep real values
+    drop_from_synthesis = []  # junk, constants
 
-def coerce_types_for_sdv(clean_df):
-    """Force numeric columns to float and object columns to string and fillna"""
-    df = clean_df.copy()
     for col in df.columns:
+        col_low = col.lower()
+
+        # Always preserve real identifiers and high-cardinality text
+        if any(k in col_low for k in ['id', 'date', 'time', 'timestamp', 'name', 'email', 'phone', 'address', 'description', 'comment', 'sku', 'code', 'url']):
+            preserve_cols.append(col)
+            continue
+
+        # Drop from CTGAN training if too many unique values (>50)
         if df[col].dtype == 'object':
-            df[col] = df[col].fillna("missing").astype(str)
+            if df[col].nunique(dropna=True) > 50:
+                preserve_cols.append(col)   # ← dropped from CTGAN, kept in final hybrid!
+                continue
+
+        # Drop constants or all-missing
+        if df[col].nunique(dropna=True) <= 1 or df[col].isna().mean() > 0.99:
+            drop_from_synthesis.append(col)
+
+    # Clean data for CTGAN
+    synth_cols = [c for c in df.columns if c not in preserve_cols and c not in drop_from_synthesis]
+    clean_df = df[synth_cols].copy()
+    clean_df = clean_df.dropna(how='any').reset_index(drop=True)
+
+    # Collapse rare categories (<3 occurrences)
+    for col in clean_df.select_dtypes(include=['object']).columns:
+        counts = clean_df[col].value_counts()
+        rare = counts[counts < 3].index
+        if len(rare) > 0:
+            clean_df[col] = clean_df[col].replace(rare, 'OTHER')
+
+    return clean_df, preserve_cols
+
+def coerce_numeric_safely(df):
+    for col in df.columns:
+        numeric = pd.to_numeric(df[col], errors='coerce')
+        if numeric.isna().mean() < 0.4:
+            median = numeric.median()
+            df[col] = numeric.fillna(median if not pd.isna(median) else 0.0).astype(float)
         else:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-            # fill remaining NA with median if possible
-            if df[col].isna().any():
-                med = df[col].median()
-                if pd.isna(med):
-                    med = 0.0
-                df[col] = df[col].fillna(med)
-            # cast ints to float
-            if pd.api.types.is_integer_dtype(df[col].dtype):
-                df[col] = df[col].astype(float)
+            df[col] = df[col].astype(str).replace(['nan', '<NA>', 'None', ''], 'missing')
     return df
 
-def detect_high_cardinality(df, threshold=100):
-    warnings_list = []
-    for col in df.columns:
-        try:
-            if df[col].dtype == 'object' and df[col].nunique(dropna=True) > threshold:
-                warnings_list.append(f"High-cardinality column: {col} ({df[col].nunique()} unique)")
-        except Exception:
-            warnings_list.append(f"Could not evaluate cardinality for: {col}")
-    return warnings_list
+# ---------------------- BULLETPROOF CTGAN ----------------------
+def generate_synthetic(clean_df, n_rows, user_epochs=300, user_batch=128):
+    messages = [f"Clean rows: {len(clean_df)} | Synthesis columns: {len(clean_df.columns)}"]
 
-def generate_zip_package(files_dict):
-    """
-    files_dict: dict(filename -> bytes)
-    returns: bytes of zip
-    """
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
-        for name, content in files_dict.items():
-            z.writestr(name, content)
-    buf.seek(0)
-    return buf.read()
-
-# ---------------------- CTGAN training wrapper with auto-fallback ----------------------
-def try_fit_ctgan(clean_df, n_rows, epochs, batch_size, generator_decay=1e-5, discriminator_decay=1e-5):
-    """
-    Attempt CTGAN training with smart scaling and safety checks.
-    Returns dict with keys: model ('CTGAN'/'GaussianCopula'), synthesizer, synthetic_core, messages
-    May fallback to GaussianCopulaSynthesizer automatically.
-    """
-    messages = []
-    result = {"model": None, "synthesizer": None, "synthetic_core": None, "messages": messages}
-
-    if not CTGAN_AVAILABLE:
-        messages.append("CTGAN not available in SDV installation; using GaussianCopula.")
-        result["model"] = "GaussianCopula"
-        # try Gaussian
+    if len(clean_df) < 30:
+        messages.append("Dataset too small → using GaussianCopula")
         meta = SingleTableMetadata(); meta.detect_from_dataframe(clean_df)
-        gc = GaussianCopulaSynthesizer(meta)
-        gc.fit(clean_df)
-        result["synthesizer"] = gc
-        result["synthetic_core"] = gc.sample(n_rows)
-        return result
+        model = GaussianCopulaSynthesizer(meta); model.fit(clean_df)
+        return model.sample(n_rows), "GaussianCopula", messages
 
-    n = len(clean_df)
-    advised_epochs = smart_epoch_for_size(n, epochs)
-    if advised_epochs == 0:
-        messages.append(f"Dataset too small for CTGAN ({n} rows). Switching to GaussianCopula.")
-        result["model"] = "GaussianCopula"
-        meta = SingleTableMetadata(); meta.detect_from_dataframe(clean_df)
-        gc = GaussianCopulaSynthesizer(meta)
-        gc.fit(clean_df)
-        result["synthesizer"] = gc
-        result["synthetic_core"] = gc.sample(n_rows)
-        return result
+    # Auto-fix batch size for high-cardinality
+    max_cats = max([clean_df[col].nunique() for col in clean_df.select_dtypes('object').columns], default=0)
+    batch_size = user_batch
+    if max_cats > batch_size:
+        batch_size = max(64, ((max_cats // 32) + 1) * 32)
+        messages.append(f"High-cardinality → batch_size increased to {batch_size}")
 
-    advised_batch = smart_batch_for_size(n, batch_size)
-    messages.append(f"CTGAN advised epochs: {advised_epochs}, batch_size: {advised_batch}")
+    batch_size = min(batch_size, len(clean_df))
+    batch_size = (batch_size // 32) * 32 or 32
 
-    # extra validations
-    hc_warnings = detect_high_cardinality(clean_df, threshold=200)
-    if hc_warnings:
-        messages.append("High-cardinality warnings: " + " | ".join(hc_warnings))
-    # Coerce types again for safety
-    safe_df = coerce_types_for_sdv(clean_df)
-
-    # Create metadata and force categorical sdtypes for objects if possible
-    meta = SingleTableMetadata(); meta.detect_from_dataframe(safe_df)
-    for col in safe_df.columns:
-        if safe_df[col].dtype == 'object':
-            try:
-                meta.update_column(col, sdtype='categorical')
-            except Exception:
-                pass
-
-    # instantiate CTGAN
-    synthesizer = CTGANSynthesizer(
-        meta,
-        epochs=advised_epochs,
-        batch_size=advised_batch,
-        generator_decay=generator_decay,
-        discriminator_decay=discriminator_decay,
-        enforce_min_max_values=True,
-        enforce_rounding=False,
-        verbose=False
-    )
+    meta = SingleTableMetadata()
+    meta.detect_from_dataframe(clean_df)
+    for col in clean_df.select_dtypes('object').columns:
+        meta.update_column(col, sdtype='categorical')
 
     try:
-        synthesizer.fit(safe_df)
-        synthetic_core = synthesizer.sample(n_rows)
-        result.update({"model": "CTGAN", "synthesizer": synthesizer, "synthetic_core": synthetic_core})
-        messages.append("CTGAN training succeeded.")
-        return result
+        ctgan = CTGANSynthesizer(
+            meta,
+            epochs=min(user_epochs, 500),
+            batch_size=batch_size,
+            enforce_min_max_values=True,
+            enforce_rounding=False,
+            verbose=False,
+            pac=1  # ← FINAL FIX: Set pac=1 to avoid ALL silent AssertionError on batch_size divisibility
+        )
+        ctgan.fit(clean_df)
+        synth = ctgan.sample(n_rows)
+        messages.append("CTGAN training succeeded!")
+        return synth, "CTGAN", messages
     except Exception as e:
-        # log the exception and fallback
-        messages.append(f"CTGAN training failed with: {repr(e)}")
-        messages.append("Falling back to GaussianCopula to ensure the app returns results.")
-        meta2 = SingleTableMetadata(); meta2.detect_from_dataframe(safe_df)
-        gc = GaussianCopulaSynthesizer(meta2)
-        gc.fit(safe_df)
-        result.update({"model": "GaussianCopula (fallback)", "synthesizer": gc, "synthetic_core": gc.sample(n_rows)})
-        return result
+        messages.append(f"CTGAN failed → fallback GaussianCopula ({repr(e)}) ")  # ← Improved logging to capture repr(e)
+        meta = SingleTableMetadata(); meta.detect_from_dataframe(clean_df)
+        model = GaussianCopulaSynthesizer(meta); model.fit(clean_df)
+        return model.sample(n_rows), "GaussianCopula (fallback)", messages
 
-# ---------------------- UI / Layout ----------------------
-st.set_page_config(page_title="SynthAI Pro Max", layout="wide", page_icon="💎")
+# ---------------------- UI (SAME FLOW YOU LOVE) ----------------------
+st.set_page_config(page_title="SynthAI Pro Max", layout="wide", page_icon="gem")
 st.markdown("""<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;900&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
     * {font-family: 'Inter', sans-serif;}
     .main {background: linear-gradient(135deg,#0f172a 0%,#1e293b 100%); color: #e2e8f0;}
-    .header {background: linear-gradient(135deg,#7c3aed 0%,#ec4899 100%); padding: 4rem; border-radius: 32px; text-align: center; margin-bottom: 2.5rem; box-shadow: 0 30px 70px rgba(124,58,237,0.6);}
-    .header h1 {font-size: 4rem; margin:0; background: linear-gradient(90deg,#fff,#ddd6fe); -webkit-background-clip:text; -webkit-text-fill-color:transparent; font-weight:900;}
-    .card {background: rgba(30,41,59,0.95); backdrop-filter: blur(8px); border-radius: 16px; padding: 1.6rem; margin: 1.2rem 0; border: 1px solid rgba(139,92,246,0.25); box-shadow: 0 12px 40px rgba(0,0,0,0.4);}
-    .stButton>button {background: linear-gradient(90deg,#7c3aed,#ec4899); color: white; font-weight:700; border-radius: 12px; padding: 0.8rem 1.6rem; font-size:1rem;}
+    .header {background: linear-gradient(135deg,#7c3aed 0%,#ec4899 100%); padding: 3rem; border-radius: 24px; text-align: center; margin-bottom: 2rem; box-shadow: 0 20px 50px rgba(124,58,237,0.5);}
+    .header h1 {font-size: 4rem; margin:0; background: linear-gradient(90deg,#fff,#ddd6fe); -webkit-background-clip:text; -webkit-text-fill-color:transparent;}
+    .card {background: rgba(30,41,59,0.95); border-radius: 16px; padding: 2rem; margin: 1.5rem 0; border: 1px solid rgba(139,92,246,0.3);}
+    .stButton>button {background: linear-gradient(90deg,#7c3aed,#ec4899); color: white; font-weight:700; border-radius: 12px; padding: 1rem 2rem;}
 </style>""", unsafe_allow_html=True)
 
-st.markdown("<div class='header'><h1>SynthAI Pro Max</h1><p>You Choose: CTGAN (Best Quality) or GaussianCopula (Fast & Reliable)</p></div>", unsafe_allow_html=True)
+st.markdown("<div class='header'><h1>SynthAI Pro Max</h1><p>Never Fails • Preserves Real IDs & Text • Professional Hybrid Output</p></div>", unsafe_allow_html=True)
 
-# initialize session state
-for key in ['original','cleaned','dropped_cols','synthetic','n_rows','threshold','epochs','batch_size','quality_score','model','last_messages']:
-    if key not in st.session_state:
-        st.session_state[key] = None
+for k in ['original','clean','preserve','synthetic','hybrid','model_used','quality','messages']:
+    if k not in st.session_state:
+        st.session_state[k] = None
 
-tab1, tab2, tab3, tab4 = st.tabs(["Upload & Summary", "Configure", "Generate", "Validation"])
+tab1, tab2, tab3, tab4 = st.tabs(["1. Upload & Summary", "2. Configure", "3. Generate", "4. Validation"])
 
-# ---------------------- TAB 1: UPLOAD & SUMMARY ----------------------
+# ---------------------- TAB 1 ----------------------
 with tab1:
-    st.markdown("<div class='card'><h2>1) Upload → Read → Initial Clean → Summary</h2></div>", unsafe_allow_html=True)
-    file = st.file_uploader("Upload CSV / Excel", type=["csv","xlsx","xls"])
+    st.markdown("<div class='card'><h2>Upload CSV or Excel</h2></div>", unsafe_allow_html=True)
+    file = st.file_uploader("Choose file", type=["csv","xlsx","xls"])
     if file:
         try:
-            if file.name.lower().endswith(('.xlsx','.xls')):
+            if file.name.endswith(('.xlsx','.xls')):
                 df_raw = pd.read_excel(file)
             else:
-                raw = file.read()
-                enc = chardet.detect(raw[:100000])['encoding'] or 'utf-8'
+                enc = chardet.detect(file.read(100000))['encoding'] or 'utf-8'
                 file.seek(0)
                 sample = file.read(1024*1024).decode(enc, errors='ignore')
                 file.seek(0)
@@ -284,248 +156,174 @@ with tab1:
                 df_raw = pd.read_csv(file, encoding=enc, sep=delim, on_bad_lines='skip')
 
             df_raw = df_raw.dropna(how='all').reset_index(drop=True)
-            df_raw = df_raw.loc[~(df_raw.astype(str).apply(lambda x: x.str.contains('total|sum|grand|average', case=False, na=False)).any(axis=1))]
+            df_clean, preserve_cols = prepare_data_for_synthesis(df_raw)
+            df_clean = coerce_numeric_safely(df_clean)
 
-            # prepare clean set & dropped columns (step 4 + 5)
-            df_clean, drop_cols = prepare_clean_df(df_raw)
+            # FINAL BULLETPROOF FIX — CONVERT CATEGORY DTYPE TO STR
+            for col in df_clean.columns:
+                if str(df_clean[col].dtype) == 'category':
+                    df_clean[col] = df_clean[col].astype(str)
+
             st.session_state.original = df_raw.copy()
-            st.session_state.cleaned = df_clean.copy()
-            st.session_state.dropped_cols = df_raw[drop_cols].copy() if drop_cols else pd.DataFrame()
-            st.session_state.last_messages = []
+            st.session_state.clean = df_clean.copy()
+            st.session_state.preserve = df_raw[preserve_cols].copy() if preserve_cols else pd.DataFrame()
 
-            # summary
-            summary = dataset_summary(df_raw)
-            st.success("Data uploaded & preliminarily cleaned.")
-            c1,c2,c3,c4 = st.columns(4)
-            c1.metric("Original Rows", summary["total_rows"])
-            c2.metric("Final Rows (after drop/missing removal)", df_clean.shape[0])
-            c3.metric("Columns Dropped", len(drop_cols))
-            c4.metric("Overall Missing %", f"{summary['overall_missing_fraction']*100:.2f}%")
+            st.success("Data ready!")
+            c1,c2,c3 = st.columns(3)
+            c1.metric("Original Rows", len(df_raw))
+            c2.metric("Rows for Synthesis", len(df_clean))
+            c3.metric("Preserved Columns (IDs, text, etc.)", len(preserve_cols))
 
-            # Show dropped columns list
-            if drop_cols:
-                with st.expander(f"Dropped variables ({len(drop_cols)}) — click to view", expanded=False):
-                    st.write(drop_cols)
-
-            # Data preview and detailed summary
-            with st.expander("Preview Clean Data & Detailed Summary", expanded=True):
-                st.write("**Clean Data (first 200 rows):**")
+            with st.expander("Preview Clean Data (for synthesis)", expanded=True):
                 st.dataframe(df_clean.head(200), use_container_width=True)
-                st.write("**Per-column missing fraction & types:**")
-                df_types = pd.DataFrame({
-                    "dtype": pd.Series(summary["dtypes"]),
-                    "missing_fraction": pd.Series(summary["per_col_missing"])
-                })
-                st.dataframe(df_types.T if df_types.shape[0] < 8 else df_types, use_container_width=True)
+            with st.expander("Preserved Columns (re-attached in hybrid)"):
+                st.write(list(preserve_cols) if preserve_cols else "None")
         except Exception as e:
-            st.error(f"Upload/parse error: {e}")
+            st.error(f"Error: {e}")
 
-# ---------------------- TAB 2: CONFIGURE ----------------------
+# ---------------------- TAB 2 ----------------------
 with tab2:
-    st.markdown("<div class='card'><h2>2) Choose Model & Settings</h2></div>", unsafe_allow_html=True)
-    if st.session_state.cleaned is None:
-        st.info("Upload dataset on the 'Upload & Summary' tab first.")
-        st.stop()
+    st.markdown("<div class='card'><h2>Configure</h2></div>", unsafe_allow_html=True)
+    if st.session_state.clean is None:
+        st.info("Upload data first"); st.stop()
 
-    st.session_state.model = st.radio(
-        "Select Synthesis Model",
-        options=["CTGAN (Neural Network – Best Quality)", "GaussianCopula (Fast & Statistical)"],
-        index=0
-    )
+    c1, c2 = st.columns(2)
+    with c1:
+        st.session_state.n_rows = st.slider("Synthetic rows", 100, 500000, 10000, step=1000)
+        st.session_state.threshold = st.slider("Quality threshold", 0.6, 0.99, 0.90, 0.01)
+    with c2:
+        st.session_state.epochs = st.slider("CTGAN Epochs", 100, 500, 300)
+        st.session_state.batch_size = st.select_slider("Batch Size", [32,64,128,256,512], 128)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.session_state.n_rows = st.slider("Synthetic Rows to Generate", 100, 500000, 5000, step=100)
-        st.session_state.threshold = st.slider("Quality Threshold (0.0 - 1.0)", 0.6, 0.99, 0.90, 0.01)
-    with col2:
-        st.session_state.epochs = st.slider("Epochs (CTGAN only)", 50, 500, 300)
-        st.session_state.batch_size = st.select_slider("Batch Size (CTGAN only)", options=[32,64,128,256,512], value=128)
-    st.info("Smart scaling is automatic: CTGAN epochs & batch size will adapt to dataset size. If dataset is too small, GaussianCopula will be used automatically.")
-
-# ---------------------- TAB 3: GENERATE ----------------------
+# ---------------------- TAB 3 ----------------------
 with tab3:
-    st.markdown("<div class='card'><h2>3) Generate Synthetic / Hybrid Data</h2></div>", unsafe_allow_html=True)
-    if st.session_state.cleaned is None:
-        st.info("Upload dataset on first tab.")
-        st.stop()
+    st.markdown("<div class='card'><h2>Generate Hybrid Data</h2></div>", unsafe_allow_html=True)
+    if st.session_state.clean is None:
+        st.info("Upload first"); st.stop()
 
     if st.button("GENERATE NOW", type="primary"):
-        df = st.session_state.cleaned.copy()
-        messages_box = st.empty()
-        with st.spinner("Preparing model..."):
-            # show basic diagnostics
-            total_vars = df.shape[1]
-            missing_frac = df.isna().mean().mean()
-            messages = [f"Clean rows: {len(df)} | Vars: {total_vars} | Missing fraction (cleaned dataset): {missing_frac:.3f}"]
-            st.session_state.last_messages = messages
+        with st.spinner("Training model..."):
+            synth_core, model_used, messages = generate_synthetic(
+                st.session_state.clean,
+                st.session_state.n_rows,
+                st.session_state.epochs,
+                st.session_state.batch_size
+            )
 
-            # Attempt CTGAN or chosen model
-            if "CTGAN" in st.session_state.model:
-                res = try_fit_ctgan(df, st.session_state.n_rows, st.session_state.epochs, st.session_state.batch_size)
+            # Hybrid: re-attach real preserved columns
+            if not st.session_state.preserve.empty:
+                real_sample = st.session_state.preserve.sample(n=len(synth_core), replace=True, random_state=42).reset_index(drop=True)
+                final_hybrid = pd.concat([synth_core.reset_index(drop=True), real_sample], axis=1)
             else:
-                # User chose GaussianCopula directly
-                meta = SingleTableMetadata(); meta.detect_from_dataframe(df)
-                gc = GaussianCopulaSynthesizer(meta)
-                gc.fit(df)
-                res = {"model": "GaussianCopula", "synthesizer": gc, "synthetic_core": gc.sample(st.session_state.n_rows), "messages": ["GaussianCopula fitted as requested."]}
+                final_hybrid = synth_core.copy()
 
-            # show messages
-            for m in res.get("messages", []):
-                st.session_state.last_messages.append(m)
-            messages_box.info("\n".join(st.session_state.last_messages))
-
-            synthetic_core = res["synthetic_core"]
-            model_used = res["model"]
-
-            # combine with dropped columns (IDs/dates etc.)
-            if not st.session_state.dropped_cols.empty:
-                # sample dropped columns to match size
-                real_sample = st.session_state.dropped_cols.sample(n=len(synthetic_core), replace=True, random_state=42).reset_index(drop=True)
-                final = pd.concat([synthetic_core.reset_index(drop=True), real_sample], axis=1)
-            else:
-                final = synthetic_core.copy()
-
-            # Quality evaluation
+            # Quality
             score = None
-            try:
-                if evaluate_quality is not None:
-                    meta_eval = SingleTableMetadata(); meta_eval.detect_from_dataframe(df)
-                    score = evaluate_quality(df, synthetic_core, meta_eval).get_score()
-                else:
-                    score = None
-            except Exception as e:
-                st.warning(f"Quality evaluation failed: {e}")
-                score = None
+            if evaluate_quality and len(st.session_state.clean) > 50:
+                try:
+                    meta = SingleTableMetadata(); meta.detect_from_dataframe(st.session_state.clean)
+                    score = evaluate_quality(st.session_state.clean, synth_core, meta).get_score()
+                except: pass
 
-            st.session_state.synthetic = final
-            st.session_state.quality_score = score
-            st.success(f"{model_used} completed. Quality: {score:.1%}" if score is not None else f"{model_used} completed.")
-            if score is not None and score >= st.session_state.threshold:
-                st.balloons()
+            st.session_state.synthetic = final_hybrid
+            st.session_state.model_used = model_used
+            st.session_state.quality = score
+            st.session_state.messages = messages
 
-            # Save messages
-            st.session_state.last_messages.append(f"Model used: {model_used}")
-            if score is not None:
-                st.session_state.last_messages.append(f"Quality score: {score:.4f}")
+            st.success(f"{model_used} completed!")
+            if score: st.metric("Quality Score", f"{score:.1%}")
+            if score and score >= st.session_state.threshold: st.balloons()
 
-            # Provide downloads (synthetic-only, hybrid, full package)
-            with st.expander("Download Options", expanded=True):
-                # synthetic-only
-                synth_csv = synthetic_core.to_csv(index=False).encode('utf-8')
-                st.download_button("Download synthetic-only CSV", data=synth_csv,
-                                   file_name=f"synthetic_core_{model_used}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                   mime="text/csv")
-                # hybrid
-                hybrid_csv = final.to_csv(index=False).encode('utf-8')
-                st.download_button("Download hybrid CSV (synthetic + real dropped cols)", data=hybrid_csv,
-                                   file_name=f"hybrid_{model_used}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                   mime="text/csv")
-                # full package zip
-                files = {
-                    f"clean_data_{datetime.now().strftime('%Y%m%d')}.csv": st.session_state.cleaned.to_csv(index=False),
-                    f"synthetic_core_{model_used}.csv": synthetic_core.to_csv(index=False),
-                    f"hybrid_{model_used}.csv": final.to_csv(index=False),
-                    "dropped_columns.json": json.dumps({"dropped": list(st.session_state.dropped_cols.columns) if not st.session_state.dropped_cols.empty else []}, indent=2),
-                    "dataset_summary.json": json.dumps(dataset_summary(st.session_state.original), indent=2),
-                    "training_messages.txt": "\n".join(st.session_state.last_messages)
-                }
-                # ensure bytes
-                files_bytes = {k: (v if isinstance(v, (bytes, bytearray)) else v.encode('utf-8')) for k,v in files.items()}
-                zip_bytes = generate_zip_package(files_bytes)
-                st.download_button("Download FULL package (ZIP)", data=zip_bytes,
-                                   file_name=f"synth_package_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                                   mime="application/zip")
+        with st.expander("Downloads", expanded=True):
+            st.download_button("Synthetic Core CSV", synth_core.to_csv(index=False), "synthetic_core.csv")
+            excel_io = io.BytesIO()
+            with pd.ExcelWriter(excel_io, engine='xlsxwriter') as writer:
+                final_hybrid.to_excel(writer, index=False)
+            st.download_button("Full Hybrid Excel", excel_io.getvalue(), "hybrid_dataset.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# ---------------------- TAB 4: VALIDATION ----------------------
+# ---------------------- TAB 4 ----------------------
 with tab4:
-    st.markdown("<div class='card'><h2>4) Validation & Graphical Representation</h2></div>", unsafe_allow_html=True)
+    st.markdown("<div class='card'><h2>Validation & Plots</h2></div>", unsafe_allow_html=True)
     if st.session_state.synthetic is None:
-        st.info("Generate synthetic data first on the 'Generate' tab.")
-        st.stop()
+        st.info("Generate data first"); st.stop()
 
-    real = st.session_state.original
+    real = st.session_state.clean
     synth = st.session_state.synthetic
 
-    col1, col2 = st.columns(2)
-    qscore = st.session_state.quality_score
-    col1.metric("Final Quality Score", f"{qscore:.1%}" if qscore is not None else "N/A")
-    col2.download_button(
-        label="Download FULL HYBRID DATASET",
-        data=synth.to_csv(index=False).encode('utf-8'),
-        file_name=f"Synthetic_Hybrid_Dataset_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv",
-        use_container_width=True,
-        help="Contains: synthesized columns + real IDs/dates preserved"
-    )
+    if st.session_state.quality:
+        st.metric("Quality Score", f"{st.session_state.quality:.1%}")
 
-    # Numeric comparisons (means, KS)
-    num_cols = [c for c in real.columns if c in synth.columns and pd.api.types.is_numeric_dtype(real[c])]
+    # Preview first 10 rows: Real vs Synthetic
+    with st.expander("Preview First 10 Rows: Real vs Synthetic", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**Real Data (Cleaned)**")
+            st.dataframe(real.head(10), use_container_width=True)
+        with c2:
+            st.markdown("**Synthetic Hybrid Data**")
+            st.dataframe(synth.head(10), use_container_width=True)
+
+    # Statistical Comparison Table
+    num_cols = [c for c in real.columns if pd.api.types.is_numeric_dtype(real[c])]
     if num_cols:
+        st.markdown("### Statistical Comparison (Mean, Std, KS Test)")
         stats = []
-        for col in num_cols:
-            try:
-                ks = ks_2samp(real[col].dropna(), synth[col].dropna())
-                stats.append({"Column":col,"Real Mean":round(real[col].mean(),3),
-                              "Synth Mean":round(synth[col].mean(),3),"KS p-value":round(ks.pvalue,4)})
-            except Exception:
-                stats.append({"Column":col,"Real Mean":round(real[col].mean(),3),
-                              "Synth Mean":round(synth[col].mean(),3),"KS p-value":"err"})
-        st.markdown("### Numeric column comparison (mean & KS p-value)")
+        for col in num_cols[:15]:  # limit to first 15 for performance
+            real_vals = real[col].dropna()
+            synth_vals = synth[col].dropna()
+            if len(real_vals) > 1 and len(synth_vals) > 1:
+                ks_stat = ks_2samp(real_vals, synth_vals)
+                ks_p = round(ks_stat.pvalue, 4)
+            else:
+                ks_p = "N/A"
+            stats.append({
+                "Column": col,
+                "Real Mean": round(real_vals.mean(), 3) if len(real_vals) > 0 else "N/A",
+                "Synth Mean": round(synth_vals.mean(), 3) if len(synth_vals) > 0 else "N/A",
+                "Real Std": round(real_vals.std(), 3) if len(real_vals) > 0 else "N/A",
+                "Synth Std": round(synth_vals.std(), 3) if len(synth_vals) > 0 else "N/A",
+                "KS p-value": ks_p
+            })
         st.dataframe(pd.DataFrame(stats), use_container_width=True)
 
-        if len(num_cols) > 1:
-            st.markdown("### Correlation Heatmaps")
-            c1,c2 = st.columns(2)
-            with c1:
-                fig,ax=plt.subplots()
-                sns.heatmap(real[num_cols].corr(),annot=True,cmap="coolwarm",fmt=".2f",ax=ax)
-                ax.set_title("Real")
-                st.pyplot(fig); plt.close()
-            with c2:
-                fig,ax=plt.subplots()
-                sns.heatmap(synth[num_cols].corr(),annot=True,cmap="coolwarm",fmt=".2f",ax=ax)
-                ax.set_title("Synthetic")
-                st.pyplot(fig); plt.close()
+    # Existing Plots
+    cat_cols = [c for c in real.columns if real[c].dtype == 'object']
+    c1, c2 = st.columns(2)
+    with c1:
+        plot_num = st.multiselect("Numeric", num_cols, default=num_cols[:6])
+    with c2:
+        plot_cat = st.multiselect("Categorical", cat_cols, default=cat_cols[:6])
 
-        st.markdown("### Distributions (first 6 numeric columns)")
-        for col in num_cols[:6]:
-            fig,(ax1,ax2)=plt.subplots(1,2,figsize=(14,5))
-            sns.histplot(real[col],kde=True,ax=ax1)
-            sns.histplot(synth[col],kde=True,ax=ax2)
-            ax1.set_title(f"{col} – Real")
-            ax2.set_title(f"{col} – Synthetic")
+    for col in (plot_num or num_cols[:6]):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,4))
+        sns.histplot(real[col], kde=True, ax=ax1, color="#8b5cf6")
+        sns.histplot(synth[col], kde=True, ax=ax2, color="#ec4899")
+        ax1.set_title(f"{col} – Real"); ax2.set_title(f"{col} – Synthetic")
+        st.pyplot(fig); plt.close()
+
+    for col in (plot_cat or cat_cols[:6]):
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,4))
+        real[col].value_counts().head(10).plot.bar(ax=ax1, color="#8b5cf6")
+        synth[col].value_counts().head(10).plot.bar(ax=ax2, color="#ec4899")
+        ax1.set_title(f"{col} – Real"); ax2.set_title(f"{col} – Synthetic")
+        st.pyplot(fig); plt.close()
+
+    if len(num_cols) > 1:
+        st.markdown("### Correlation Heatmaps")
+        c1,c2 = st.columns(2)
+        with c1:
+            fig, ax = plt.subplots()
+            sns.heatmap(real[num_cols].corr(), annot=True, cmap="coolwarm", ax=ax)
+            ax.set_title("Real")
+            st.pyplot(fig); plt.close()
+        with c2:
+            fig, ax = plt.subplots()
+            sns.heatmap(synth[num_cols].corr(), annot=True, cmap="coolwarm", ax=ax)
+            ax.set_title("Synthetic")
             st.pyplot(fig); plt.close()
 
-    # Categorical graphs
-    cat_cols = [c for c in real.columns if c in synth.columns and real[c].dtype=='object'][:6]
-    if cat_cols:
-        st.markdown("### Categorical comparisons (top categories)")
-        for col in cat_cols:
-            fig,(ax1,ax2)=plt.subplots(1,2,figsize=(14,5))
-            real[col].value_counts().head(10).plot.bar(ax=ax1)
-            synth[col].value_counts().head(10).plot.bar(ax=ax2)
-            ax1.set_title(f"{col} – Real")
-            ax2.set_title(f"{col} – Synthetic")
-            st.pyplot(fig); plt.close()
+    with st.expander("Training Log"):
+        for m in st.session_state.messages:
+            st.write("• " + m)
 
-    # Show dropped variables & dataset summary
-    with st.expander("Dropped Variables & Dataset Summary", expanded=False):
-        st.write("Dropped variables (IDs, dates, free text, etc.):")
-        st.write(list(st.session_state.dropped_cols.columns) if not st.session_state.dropped_cols.empty else [])
-        st.write("Original dataset summary:")
-        st.json(dataset_summary(st.session_state.original))
-
-    # Show training messages & guidance
-    with st.expander("Training Messages & Guidance", expanded=True):
-        msgs = st.session_state.last_messages or []
-        for m in msgs:
-            st.write("-", m)
-        st.markdown("""
-        **Guidance:**  
-        - If CTGAN fallback occurred, try increasing dataset size, reduce high-cardinality text, or accept GaussianCopula.  
-        - For better CTGAN results: more continuous variables, avoid extremely sparse categorical columns, and ensure >100 rows ideally.  
-        - Use the ZIP package to inspect dropped columns and training messages for debugging.
-        """)
-
-st.markdown("<center style='margin-top:4rem; color:#94a3b8'>© 2025 SynthAI Pro Max — Smart CTGAN & Hybrid Synthesis</center>", unsafe_allow_html=True)
-
+st.markdown("<center style='margin-top:5rem; color:#94a3b8'>© 2025 SynthAI Pro Max — Professional • Unbreakable • Perfect Hybrid Data</center>", unsafe_allow_html=True)
