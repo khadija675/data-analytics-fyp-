@@ -1,19 +1,13 @@
-scipy
 tqdm
-# Core Streamlit application and data handling
-streamlit==1.30.0
-pandas>=2.1.0
-numpy>=1.26.0
-
-# Visualization and plotting
-matplotlib>=3.8.0
-seaborn>=0.13.0
-
-# Synthetic Data Generation (SDG) ecosystem
-sdv>=1.7.0  # Includes CTGAN, GaussianCopula, and SDMetrics
 faker>=21.0.0
-
-# Required for pandas to read Excel files
-openpyxl>=3.1.2
-xlsxwriter
 scikit-learn
+torch>=2.0.0
+streamlit
+pandas
+numpy
+matplotlib
+seaborn
+scipy
+sdv
+chardet
+openpyxl
